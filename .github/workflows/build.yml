@@ -1,0 +1,527 @@
+#-----------------------------------------------------------------------#
+# build.yml                                                             #
+#                                                                       #
+#   OpenRGB GitHub Actions Configuration                                #
+#                                                                       #
+#   This file is part of the OpenRGB project                            #
+#   SPDX-License-Identifier: GPL-2.0-or-later                           #
+#                                                                       #
+#   GitHub Actions port of the GitLab pipeline (.gitlab-ci.yml).        #
+#                                                                       #
+#   Execution rules (mirroring the GitLab CI):                          #
+#   * Automatic: runs all jobs on pushes to the default branch and on   #
+#     pull requests.                                                    #
+#   * Manual: run all jobs (or a subset, see inputs) via the "Run      #
+#     workflow" button (workflow_dispatch), e.g. for downstream forks   #
+#     as GitLab does with manual jobs.                                  #
+#                                                                       #
+#   Differences from the GitLab pipeline:                               #
+#   * The GitLab build images (registry.gitlab.com/openrgbdevelopers/  #
+#     openrgb-linux-ci-deb-builder) are reused for the Linux AppImage   #
+#     and Supported Devices jobs.                                       #
+#   * The .deb and .rpm jobs run in the matching distro containers and  #
+#     install their own build dependencies.                             #
+#   * Windows jobs install Qt via jurplel/install-qt-action instead of  #
+#     the private OpenRGB-Qt-Packages Chocolatey repository.            #
+#   * Windows 32-bit Qt6 is not built: Qt6 does not ship 32-bit         #
+#     binaries in the official Qt repositories used by install-qt.      #
+#   * i386 / armhf Linux targets are not built: no native GitHub        #
+#     Actions runners exist for those architectures.                    #
+#   * Legacy Qt5 Windows/macOS builds are marked continue-on-error      #
+#     because the Qt5 toolchains are EOL and may disappear from their   #
+#     upstream package sources.                                         #
+#-----------------------------------------------------------------------#
+
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: Run package smoke-test jobs
+        type: boolean
+        default: true
+      run_msi:
+        description: Build the Windows MSI installer
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openrgb-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  #-----------------------------------------------------------#
+  # Supported Devices Build Target                            #
+  #   GitLab: "Supported Devices"                             #
+  #-----------------------------------------------------------#
+  supported-devices:
+    name: Supported Devices
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.gitlab.com/openrgbdevelopers/openrgb-linux-ci-deb-builder:bookworm-amd64
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and generate supported devices list
+        run: |
+          qmake
+          make -j$(nproc)
+          ./scripts/build-supported-devices-md.sh "$GITHUB_WORKSPACE" "${{ github.sha }}"
+      - name: Upload Supported Devices CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: supported-devices-csv
+          path: Supported Devices.csv
+
+  #-----------------------------------------------------------#
+  # Linux AppImage Build Targets                              #
+  #   GitLab: "Linux <arch> AppImage (Qt5)"                   #
+  #-----------------------------------------------------------#
+  linux-appimage:
+    name: Linux ${{ matrix.arch }} AppImage (${{ matrix.qt }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            qt: qt6
+          - arch: amd64
+            runner: ubuntu-24.04
+            qt: qt5
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            qt: qt6
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            qt: qt5
+    container:
+      image: registry.gitlab.com/openrgbdevelopers/openrgb-linux-ci-deb-builder:bookworm-${{ matrix.arch }}
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build AppImage
+        run: |
+          export $(dpkg-architecture)
+          ./scripts/build-appimage.sh ${{ matrix.qt }}
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-appimage-${{ matrix.arch }}-${{ matrix.qt }}
+          path: |
+            OpenRGB-*.AppImage
+            60-openrgb.rules
+
+  #-----------------------------------------------------------#
+  # Linux .deb Build Targets                                  #
+  #   GitLab: "Linux <arch> .deb (Debian <distro>)"           #
+  #-----------------------------------------------------------#
+  linux-deb:
+    name: Linux ${{ matrix.arch }} .deb (${{ matrix.distro }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: bookworm
+            distro-title: Bookworm
+            arch: amd64
+            runner: ubuntu-24.04
+          - distro: trixie
+            distro-title: Trixie
+            arch: amd64
+            runner: ubuntu-24.04
+          - distro: bookworm
+            distro-title: Bookworm
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - distro: trixie
+            distro-title: Trixie
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    container: debian:${{ matrix.distro }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl unzip dpkg-dev debhelper pkg-config \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev-tools qt5-qmake \
+            libusb-1.0-0-dev libhidapi-dev libmbedtls-dev
+      - uses: actions/checkout@v4
+      - name: Install libhidapi-hotplug (best effort, from OpenRGBDevelopers/hidapi-hotplug)
+        continue-on-error: true
+        run: |
+          curl -L -o hidapi-hotplug.zip \
+            "https://gitlab.com/OpenRGBDevelopers/hidapi-hotplug/-/jobs/artifacts/master/download?job=Linux+${{ matrix.arch }}+.deb+%28Debian+${{ matrix.distro-title }}%29"
+          unzip -o hidapi-hotplug.zip
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ./libhidapi-hotplug*.deb
+      - name: Prepare package files
+        run: ./scripts/build-package-files.sh debian/changelog
+      - name: Build Debian package
+        run: |
+          dpkg-architecture -l
+          # dpkg-buildpackage refuses to run as root; run it as a builder user.
+          # The .deb files are written to the parent of the source directory,
+          # so that directory must be writable by the builder user too.
+          if [ "$(id -u)" = "0" ]; then
+            useradd -m -u 2000 builder
+            chown -R builder:builder "$GITHUB_WORKSPACE"
+            chown builder:builder "$(dirname "$GITHUB_WORKSPACE")"
+            su builder -c "cd '$GITHUB_WORKSPACE' && dpkg-buildpackage -us -B -d"
+          else
+            dpkg-buildpackage -us -B -d
+          fi
+          # -d skips the build-dependency check because libhidapi-hotplug-dev
+          # is not available in the Debian repositories.
+          rm -f ../openrgb-dbgsym*.deb
+          mv -v ../openrgb*.deb ./
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-deb-${{ matrix.distro }}-${{ matrix.arch }}
+          path: openrgb*.deb
+
+  #-----------------------------------------------------------#
+  # Linux .rpm Build Target                                   #
+  #   GitLab: "Linux 64 F43 rpm"                              #
+  #-----------------------------------------------------------#
+  fedora-rpm:
+    name: Linux 64 F43 rpm
+    runs-on: ubuntu-24.04
+    container: fedora:43
+    steps:
+      - name: Install prerequisites
+        run: dnf install -y git
+      - uses: actions/checkout@v4
+      - name: Build RPM
+        run: |
+          dnf install rpmdevtools dnf-plugins-core libcurl-devel qt5-qtbase-devel wget unzip -y
+          wget -O hidapi-hotplug.zip \
+            "https://gitlab.com/OpenRGBDevelopers/hidapi-hotplug/-/jobs/artifacts/master/download?job=Linux+64+F43+rpm"
+          unzip hidapi-hotplug.zip
+          dnf install ./*.rpm -y
+          rpmdev-setuptree
+          ./scripts/build-package-files.sh fedora/OpenRGB.spec
+          cp fedora/OpenRGB.spec /root/rpmbuild/SPECS
+          cp -rp . /root/rpmbuild/SOURCES/OpenRGB
+          cd /root/rpmbuild
+          dnf builddep SPECS/OpenRGB.spec -y
+          rpmbuild -ba SPECS/OpenRGB.spec
+          cd RPMS/x86_64/
+          mv openrgb*.rpm "$GITHUB_WORKSPACE"/
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-rpm-fedora43
+          path: openrgb*.rpm
+
+  #-----------------------------------------------------------#
+  # Windows Build Targets                                    #
+  #   GitLab: "Windows 32", "Windows 64", "Windows * Qt5"    #
+  #-----------------------------------------------------------#
+  windows:
+    name: Windows ${{ matrix.bits }}-bit (${{ matrix.qt-short }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bits: 64
+            qt: 6.8.3
+            qt-short: Qt6
+            qt-arch: win64_msvc2022_64
+            qt-modules: qt5compat
+            msvc: 2022
+            runner: windows-2022
+            legacy: false
+          - bits: 64
+            qt: 5.15.0
+            qt-short: Qt5
+            qt-arch: win64_msvc2019_64
+            qt-modules: ''
+            msvc: 2019
+            runner: windows-2019
+            legacy: true
+          - bits: 32
+            qt: 5.15.0
+            qt-short: Qt5
+            qt-arch: win32_msvc2019
+            qt-modules: ''
+            msvc: 2019
+            runner: windows-2019
+            legacy: true
+    continue-on-error: ${{ matrix.legacy }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.qt }}
+          arch: ${{ matrix.qt-arch }}
+          modules: ${{ matrix.qt-modules }}
+      - name: Install jom
+        shell: powershell
+        run: |
+          curl.exe -L -o jom.zip https://download.qt.io/official_releases/jom/jom_1_1_4.zip
+          Expand-Archive -Force jom.zip -DestinationPath "$env:RUNNER_TEMP\jom"
+          Add-Content -Path "$env:GITHUB_PATH" -Value "$env:RUNNER_TEMP\jom"
+      - name: Build (mirrors scripts/build-windows.bat)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bits  = "${{ matrix.bits }}"
+          $msvc  = "${{ matrix.msvc }}"
+          $qtVer = "${{ matrix.qt }}"
+          $isQt6 = $qtVer.StartsWith('6')
+          $arch  = if ($bits -eq '32') { 'x86' } else { 'x64' }
+          $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\$msvc\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+
+          # Configure the MSVC environment, then configure and build with qmake/jom.
+          $cmdLine = "call `"$vcvars`" $arch >nul 2>&1 && qmake OpenRGB.pro CONFIG-=debug_and_release CONFIG+=release && jom"
+          cmd /c $cmdLine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $wdArgs = '--no-quick-import --no-translations --no-system-d3d-compiler --no-compiler-runtime --no-opengl-sw --no-network'
+          if ($isQt6) {
+            windeployqt --no-patchqt $wdArgs .\release\
+          } else {
+            windeployqt $wdArgs .\release\
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Manually copy Qt6OpenGL.dll and Qt6Core5Compat.dll (Effects plugin).
+          if ($isQt6) {
+            $qtBin = Split-Path (Get-Command qmake).Source
+            Copy-Item "$qtBin\Qt6Core5Compat.dll" .\release\
+            Copy-Item "$qtBin\Qt6OpenGL.dll" .\release\
+          }
+          Move-Item -Force .\release "OpenRGB Windows $bits-bit"
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-windows-${{ matrix.bits }}-${{ matrix.qt-short }}
+          path: OpenRGB Windows ${{ matrix.bits }}-bit
+
+  #-----------------------------------------------------------#
+  # MacOS Build Targets                                      #
+  #   GitLab: "MacOS ARM64", "MacOS Intel", "MacOS * Qt5"    #
+  #-----------------------------------------------------------#
+  macos:
+    name: MacOS ${{ matrix.arch }} (${{ matrix.qt }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - qt: qt6
+            arch: arm
+            runner: macos-14
+            legacy: false
+          - qt: qt6
+            arch: intel
+            runner: macos-13
+            legacy: false
+          - qt: qt5
+            arch: arm
+            runner: macos-14
+            legacy: true
+          - qt: qt5
+            arch: intel
+            runner: macos-13
+            legacy: true
+    continue-on-error: ${{ matrix.legacy }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create self-signed code signing certificate
+        run: |
+          set -e
+          CERT_DIR="$RUNNER_TEMP/codesign"
+          mkdir -p "$CERT_DIR"
+          printf '%s\n' \
+            '[req]' \
+            'distinguished_name = dn' \
+            'x509_extensions = v3_ca' \
+            'prompt = no' \
+            '[dn]' \
+            'CN = OpenRGB' \
+            '[v3_ca]' \
+            'basicConstraints = critical,CA:true' \
+            'keyUsage = critical,digitalSignature,keyEncipherment,keyCertSign' \
+            'extendedKeyUsage = critical,codeSigning' \
+            'subjectKeyIdentifier = hash' \
+            'authorityKeyIdentifier = keyid:always,issuer' \
+            > "$CERT_DIR/cert.cnf"
+          openssl req -new -newkey rsa:2048 -x509 -nodes -days 3650 \
+            -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" \
+            -config "$CERT_DIR/cert.cnf"
+          openssl pkcs12 -export -in "$CERT_DIR/cert.pem" -inkey "$CERT_DIR/key.pem" \
+            -out "$CERT_DIR/cert.p12" -passout pass:"" -name "OpenRGB"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          security import "$CERT_DIR/cert.p12" -k "$KEYCHAIN" -P ""
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN"
+          security find-identity -v -p codesigning
+      - name: Install dependencies
+        run: |
+          set -e
+          QT="${{ matrix.qt }}"
+          brew install hidapi libusb mbedtls@3
+          if [ "$QT" = "qt5" ]; then
+            brew install qt@5 libwebp
+          else
+            brew install qt qt5compat qt-tools
+          fi
+          BREW_PREFIX="$(brew --prefix)"
+          # scripts/build-macos.sh expects the older /opt/homebrew/opt/qtbase path.
+          if [ -d "$BREW_PREFIX/opt/qt-base" ] && [ ! -e "$BREW_PREFIX/opt/qtbase" ]; then
+            ln -sfn "$BREW_PREFIX/opt/qt-base" "$BREW_PREFIX/opt/qtbase"
+          fi
+          if [ "$QT" = "qt6" ]; then
+            ln -sfn "$BREW_PREFIX/opt/qt/bin/qmake6"          "$BREW_PREFIX/bin/qmake"
+            ln -sfn "$BREW_PREFIX/opt/qt-base/bin/macdeployqt" "$BREW_PREFIX/bin/macdeployqt"
+            ln -sfn "$BREW_PREFIX/opt/qt-tools/bin/lrelease"   "$BREW_PREFIX/bin/lrelease" || true
+          fi
+      - name: Build MacOS app
+        run: ./scripts/build-macos.sh ${{ matrix.qt }} ${{ matrix.arch }}
+      - name: Upload MacOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-macos-${{ matrix.arch }}-${{ matrix.qt }}
+          path: OpenRGB.app
+
+  #-----------------------------------------------------------#
+  # Windows 64 MSI Target (deploy)                           #
+  #   GitLab: "Windows 64 MSI"                               #
+  #-----------------------------------------------------------#
+  windows-msi:
+    name: Windows 64 MSI
+    runs-on: windows-2022
+    needs: windows
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_msi }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt (for qmake version extraction)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: win64_msvc2022_64
+      - name: Download Windows 64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: openrgb-windows-64-Qt6
+          path: OpenRGB Windows 64-bit
+      - name: Install WiX
+        shell: bash
+        run: choco install wixtoolset -y --no-progress
+      - name: Build MSI
+        shell: bash
+        run: |
+          command -v uuidgen >/dev/null 2>&1 || { echo "::error::uuidgen not available in Git Bash"; exit 1; }
+          WIX_BIN="$(ls -d '/c/Program Files (x86)/WiX'*/bin 2>/dev/null | head -n1)"
+          [ -n "$WIX_BIN" ] && export PATH="$PATH:$WIX_BIN"
+          bash scripts/build-msi.sh
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrgb-windows-64-msi
+          path: OpenRGB_Windows_64.msi
+
+  #-----------------------------------------------------------#
+  # Debian tests (test)                                      #
+  #   GitLab: "Debian i386/amd64 Bookworm"                   #
+  #-----------------------------------------------------------#
+  test-debian:
+    name: Test Debian ${{ matrix.arch }} Bookworm
+    runs-on: ${{ matrix.runner }}
+    needs: linux-deb
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    container: debian:bookworm
+    steps:
+      - name: Download OpenRGB .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: openrgb-deb-bookworm-${{ matrix.arch }}
+      - name: Install and smoke test
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl ca-certificates
+          curl -o hidapi-hotplug.zip -L \
+            "https://gitlab.com/OpenRGBDevelopers/hidapi-hotplug/-/jobs/artifacts/master/download?job=Linux+${{ matrix.arch }}+.deb+%28Debian+Bookworm%29"
+          unzip hidapi-hotplug.zip
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ./libhidapi-hotplug*.deb
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ./openrgb*${{ matrix.arch }}.deb
+          openrgb --version
+          DEBIAN_FRONTEND=noninteractive apt-get remove -y openrgb
+
+  #-----------------------------------------------------------#
+  # Ubuntu test (test)                                       #
+  #   GitLab: "Ubuntu amd64 24.04LTS"                        #
+  #-----------------------------------------------------------#
+  test-ubuntu:
+    name: Test Ubuntu amd64 24.04LTS
+    runs-on: ubuntu-24.04
+    needs: linux-deb
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    container: ubuntu:noble
+    steps:
+      - name: Download OpenRGB .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: openrgb-deb-bookworm-amd64
+      - name: Install and smoke test
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl ca-certificates
+          curl -o hidapi-hotplug.zip -L \
+            "https://gitlab.com/OpenRGBDevelopers/hidapi-hotplug/-/jobs/artifacts/master/download?job=Linux+amd64+.deb+%28Debian+Bookworm%29"
+          unzip hidapi-hotplug.zip
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ./libhidapi-hotplug*.deb
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ./openrgb*amd64.deb
+          openrgb --version
+          DEBIAN_FRONTEND=noninteractive apt-get remove -y openrgb
+
+  #-----------------------------------------------------------#
+  # Fedora test (test)                                      #
+  #   GitLab: "Fedora 64 v43"                               #
+  #-----------------------------------------------------------#
+  test-fedora:
+    name: Test Fedora 64 v43
+    runs-on: ubuntu-24.04
+    needs: fedora-rpm
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    container: fedora:43
+    steps:
+      - name: Download OpenRGB RPM
+        uses: actions/download-artifact@v4
+        with:
+          name: openrgb-rpm-fedora43
+      - name: Install and smoke test
+        run: |
+          dnf install -y unzip wget
+          wget -O hidapi-hotplug.zip \
+            "https://gitlab.com/OpenRGBDevelopers/hidapi-hotplug/-/jobs/artifacts/master/download?job=Linux+64+F43+rpm"
+          unzip hidapi-hotplug.zip
+          dnf install -y ./*.rpm
+          dnf5 -y install ./openrgb*64.rpm
+          openrgb --version
+          dnf5 -y remove openrgb
