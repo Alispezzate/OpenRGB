@@ -37,6 +37,7 @@
 #define Glorious_Model_D_PID                0x0033
 #define Glorious_Model_DW_PID1              0x2023 // Wireless
 #define Glorious_Model_DW_PID2              0x2012 // When connected via cable
+#define Glorious_Model_D2_PID               0x2031
 #define Everest_GT100_PID                   0x0029
 #define ZET_FURY_PRO_PID                    0x1007
 #define Fl_Esports_F11_PID                  0x0049
@@ -334,6 +335,50 @@ DetectedControllers DetectGMOW_Dongle(hid_device_info* info, const std::string& 
     return(detected_controllers);
 }
 
+DetectedControllers DetectGloriousModelD2(hid_device_info* info, const std::string& name)
+{
+    DetectedControllers detected_controllers;
+    hid_device*         dev;
+
+    dev = hid_open_path(info->path);
+
+    if(dev)
+    {
+        unsigned char buf_send[GMOW_PACKET_SIZE]     = {0};
+        unsigned char buf_receive[GMOW_PACKET_SIZE]  = {0};
+
+        buf_send[0x03] = 0x02;
+        buf_send[0x04] = 0x03;
+        buf_send[0x06] = 0x81;
+
+        bool protocol_found = false;
+
+        if(hid_send_feature_report(dev, buf_send, GMOW_PACKET_SIZE) > -1)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+            if(hid_get_feature_report(dev, buf_receive, GMOW_PACKET_SIZE) > -1)
+            {
+                protocol_found = (buf_receive[0x06] == 0x81);
+            }
+        }
+
+        if(protocol_found)
+        {
+            SinowealthGMOWController* controller     = new SinowealthGMOWController(dev, info->path, GMOW_CABLE_CONNECTED, name);
+            RGBController_GMOW*       rgb_controller = new RGBController_GMOW(controller);
+
+            detected_controllers.push_back(rgb_controller);
+        }
+        else
+        {
+            hid_close(dev);
+        }
+    }
+
+    return(detected_controllers);
+}
+
 // static void DetectSinowealthKeyboard16(hid_device_info* info, const std::string& name)
 // {
 //     unsigned char command[6] = {0x05, 0x83, 0x00, 0x00, 0x00, 0x00};
@@ -424,6 +469,7 @@ REGISTER_HID_DETECTOR_PU("Glorious Model O / O- Wireless",  DetectGMOW_Dongle,  
 REGISTER_HID_DETECTOR_PU("Glorious Model O / O- Wireless",  DetectGMOW_Cable,                   SINOWEALTH_VID, Glorious_Model_OW_PID2,                 0xFFFF, 0x0000  );
 REGISTER_HID_DETECTOR_PU("Glorious Model D / D- Wireless",  DetectGMOW_Dongle,                  SINOWEALTH_VID, Glorious_Model_DW_PID1,                 0xFFFF, 0x0000  );
 REGISTER_HID_DETECTOR_PU("Glorious Model D / D- Wireless",  DetectGMOW_Cable,                   SINOWEALTH_VID, Glorious_Model_DW_PID2,                 0xFFFF, 0x0000  );
+REGISTER_HID_DETECTOR("Glorious Model D 2",                 DetectGloriousModelD2,              SINOWEALTH_VID, Glorious_Model_D2_PID                               );
 REGISTER_HID_DETECTOR_PU("Genesis Xenon 200",               DetectGenesisXenon200,              SINOWEALTH_VID, GENESIS_XENON_200_PID,                  0xFF00, 1       );
 REGISTER_HID_DETECTOR_IPU("Genesis Thor 300",               DetectSinowealthGenesisKeyboard,    SINOWEALTH_VID, GENESIS_THOR_300_PID,               1,  0xFF00, 1       );
 REGISTER_HID_DETECTOR_IPU("Sinowealth Keyboard",            DetectSinowealthKeyboard10c,        SINOWEALTH_VID, RGB_KEYBOARD_010CPID,               1,  0xFF00, 1       );
