@@ -291,20 +291,53 @@ jobs:
           cmd /c $cmdLine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $wdArgs = '--no-quick-import --no-translations --no-system-d3d-compiler --no-compiler-runtime --no-opengl-sw --no-network'
-          if ($isQt6) {
-            windeployqt --no-patchqt $wdArgs .\release\
-          } else {
-            windeployqt $wdArgs .\release\
+          # Build diagnostics: qmake location and Qt bin directory.
+          $qmakePath = (Get-Command qmake).Source
+          Write-Host "qmake location: $qmakePath"
+          $qtBin = Split-Path $qmakePath
+          Write-Host "Qt bin folder: $qtBin"
+
+          # Resolve windeployqt from the same Qt bin as qmake so the Qt tools
+          # always match the toolchain used to build the binary.
+          $windeploy = Join-Path $qtBin 'windeployqt.exe'
+          Write-Host "windeployqt exists: $(Test-Path $windeploy)"
+          if (-not (Test-Path $windeploy)) {
+            Write-Host "::error::windeployqt not found at $windeploy"
+            Get-ChildItem -Path $qtBin -File | Select-Object Name
+            exit 1
           }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          & $windeploy --version
+          Write-Host "windeployqt --version exit code: $LASTEXITCODE"
+
+          # Flags as an array so each token is passed as a separate argument.
+          $wdArgs = @(
+            '--no-quick-import','--no-translations','--no-system-d3d-compiler',
+            '--no-compiler-runtime','--no-opengl-sw','--no-network'
+          )
+          if ($isQt6) {
+            $wdArgs = @('--no-patchqt') + $wdArgs
+          }
+
+          Write-Host "Invoking: $windeploy $($wdArgs -join ' ') .\release\"
+          & $windeploy $wdArgs .\release\
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::windeployqt failed with exit code $LASTEXITCODE"
+            Write-Host "Contents of release directory:"
+            Get-ChildItem -Path .\release -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length
+            exit $LASTEXITCODE
+          }
 
           # Manually copy Qt6OpenGL.dll and Qt6Core5Compat.dll (Effects plugin).
           if ($isQt6) {
-            $qtBin = Split-Path (Get-Command qmake).Source
-            Copy-Item "$qtBin\Qt6Core5Compat.dll" .\release\
-            Copy-Item "$qtBin\Qt6OpenGL.dll" .\release\
+            $qt6core5 = Join-Path $qtBin 'Qt6Core5Compat.dll'
+            $qt6ogl   = Join-Path $qtBin 'Qt6OpenGL.dll'
+            if (-not (Test-Path $qt6core5)) { Write-Host "::warning::Qt6Core5Compat.dll not found at $qt6core5" }
+            else { Copy-Item $qt6core5 .\release\ -Force }
+            if (-not (Test-Path $qt6ogl))   { Write-Host "::warning::Qt6OpenGL.dll not found at $qt6ogl" }
+            else { Copy-Item $qt6ogl .\release\ -Force }
           }
+
           Move-Item -Force .\release "OpenRGB Windows $bits-bit"
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
