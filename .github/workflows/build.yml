@@ -286,24 +286,36 @@ jobs:
           $arch  = if ($bits -eq '32') { 'x86' } else { 'x64' }
           $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\$msvc\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 
-          # Configure the MSVC environment, then configure and build with qmake/jom.
-          $cmdLine = "call `"$vcvars`" $arch >nul 2>&1 && qmake OpenRGB.pro CONFIG-=debug_and_release CONFIG+=release && jom"
-          cmd /c $cmdLine
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          # Build diagnostics: qmake location and Qt bin directory.
+          # Diagnostics FIRST so a failure is never silent.
           # QT_ROOT_DIR is set by install-qt-action and is the most reliable
           # reference for the Qt installation root.
           Write-Host "QT_ROOT_DIR: $env:QT_ROOT_DIR"
+          if (-not (Test-Path $vcvars)) {
+            Write-Host "::error::vcvarsall.bat not found at $vcvars"
+            exit 1
+          }
           $qmakeCmd = Get-Command qmake -ErrorAction SilentlyContinue
-          $qmakePath = if ($qmakeCmd) { $qmakeCmd.Source } else { $null }
-          Write-Host "qmake location: $qmakePath"
+          $jomCmd   = Get-Command jom   -ErrorAction SilentlyContinue
+          Write-Host "qmake location: $($qmakeCmd.Source)"
+          Write-Host "jom location: $($jomCmd.Source)"
+          Write-Host "PATH: $env:PATH"
+
+          # Configure the MSVC environment, then configure and build with qmake/jom.
+          # vcvars output is kept visible so toolchain failures are reported.
+          $cmdLine = "call `"$vcvars`" $arch && qmake OpenRGB.pro CONFIG-=debug_and_release CONFIG+=release && jom"
+          cmd /c $cmdLine
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::qmake/jom build failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          # Qt bin directory for windeployqt and manual DLL copies.
           $qtBin = $null
           if ($env:QT_ROOT_DIR) {
             $cand = Join-Path $env:QT_ROOT_DIR 'bin'
             if (Test-Path $cand) { $qtBin = $cand }
           }
-          if (-not $qtBin -and $qmakePath) { $qtBin = Split-Path $qmakePath }
+          if (-not $qtBin -and $qmakeCmd) { $qtBin = Split-Path $qmakeCmd.Source }
           Write-Host "Qt bin folder: $qtBin"
 
           # Locate windeployqt.exe. Prefer the Qt bin dir derived from
@@ -323,7 +335,7 @@ jobs:
           }
           Write-Host "Using windeployqt: $windeploy"
           if (-not $windeploy) {
-            Write-Host "::error::windeployqt not found (QT_ROOT_DIR=$env:QT_ROOT_DIR, qmake=$qmakePath)"
+            Write-Host "::error::windeployqt not found (QT_ROOT_DIR=$env:QT_ROOT_DIR, qmake=$($qmakeCmd.Source))"
             if ($env:QT_ROOT_DIR -and (Test-Path $env:QT_ROOT_DIR)) {
               Write-Host "Contents of QT_ROOT_DIR:"
               Get-ChildItem -Path $env:QT_ROOT_DIR -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName
