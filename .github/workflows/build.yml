@@ -292,18 +292,42 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Build diagnostics: qmake location and Qt bin directory.
-          $qmakePath = (Get-Command qmake).Source
+          # QT_ROOT_DIR is set by install-qt-action and is the most reliable
+          # reference for the Qt installation root.
+          Write-Host "QT_ROOT_DIR: $env:QT_ROOT_DIR"
+          $qmakeCmd = Get-Command qmake -ErrorAction SilentlyContinue
+          $qmakePath = if ($qmakeCmd) { $qmakeCmd.Source } else { $null }
           Write-Host "qmake location: $qmakePath"
-          $qtBin = Split-Path $qmakePath
+          $qtBin = $null
+          if ($env:QT_ROOT_DIR) {
+            $cand = Join-Path $env:QT_ROOT_DIR 'bin'
+            if (Test-Path $cand) { $qtBin = $cand }
+          }
+          if (-not $qtBin -and $qmakePath) { $qtBin = Split-Path $qmakePath }
           Write-Host "Qt bin folder: $qtBin"
 
-          # Resolve windeployqt from the same Qt bin as qmake so the Qt tools
-          # always match the toolchain used to build the binary.
-          $windeploy = Join-Path $qtBin 'windeployqt.exe'
-          Write-Host "windeployqt exists: $(Test-Path $windeploy)"
-          if (-not (Test-Path $windeploy)) {
-            Write-Host "::error::windeployqt not found at $windeploy"
-            Get-ChildItem -Path $qtBin -File | Select-Object Name
+          # Locate windeployqt.exe. Prefer the Qt bin dir derived from
+          # QT_ROOT_DIR, then a recursive search, then PATH.
+          $windeploy = $null
+          if ($qtBin) {
+            $cand = Join-Path $qtBin 'windeployqt.exe'
+            if (Test-Path $cand) { $windeploy = $cand }
+          }
+          if (-not $windeploy -and $env:QT_ROOT_DIR -and (Test-Path $env:QT_ROOT_DIR)) {
+            $found = Get-ChildItem -Path $env:QT_ROOT_DIR -Recurse -Filter windeployqt.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $windeploy = $found.FullName }
+          }
+          if (-not $windeploy) {
+            $cmd = Get-Command windeployqt -ErrorAction SilentlyContinue
+            if ($cmd) { $windeploy = $cmd.Source }
+          }
+          Write-Host "Using windeployqt: $windeploy"
+          if (-not $windeploy) {
+            Write-Host "::error::windeployqt not found (QT_ROOT_DIR=$env:QT_ROOT_DIR, qmake=$qmakePath)"
+            if ($env:QT_ROOT_DIR -and (Test-Path $env:QT_ROOT_DIR)) {
+              Write-Host "Contents of QT_ROOT_DIR:"
+              Get-ChildItem -Path $env:QT_ROOT_DIR -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName
+            }
             exit 1
           }
 
