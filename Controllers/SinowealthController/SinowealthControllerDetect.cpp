@@ -338,42 +338,14 @@ DetectedControllers DetectGMOW_Dongle(hid_device_info* info, const std::string& 
 DetectedControllers DetectGloriousModelD2(hid_device_info* info, const std::string& name)
 {
     DetectedControllers detected_controllers;
-    hid_device*         dev;
-
-    dev = hid_open_path(info->path);
+    hid_device*         dev = hid_open_path(info->path);
 
     if(dev)
     {
-        unsigned char buf_send[GMOW_PACKET_SIZE]     = {0};
-        unsigned char buf_receive[GMOW_PACKET_SIZE]  = {0};
+        SinowealthGMOWController* controller     = new SinowealthGMOWController(dev, info->path, GMOW_CABLE_CONNECTED, name);
+        RGBController_GMOW*       rgb_controller = new RGBController_GMOW(controller);
 
-        buf_send[0x03] = 0x02;
-        buf_send[0x04] = 0x03;
-        buf_send[0x06] = 0x81;
-
-        bool protocol_found = false;
-
-        if(hid_send_feature_report(dev, buf_send, GMOW_PACKET_SIZE) > -1)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-            if(hid_get_feature_report(dev, buf_receive, GMOW_PACKET_SIZE) > -1)
-            {
-                protocol_found = (buf_receive[0x06] == 0x81);
-            }
-        }
-
-        if(protocol_found)
-        {
-            SinowealthGMOWController* controller     = new SinowealthGMOWController(dev, info->path, GMOW_CABLE_CONNECTED, name);
-            RGBController_GMOW*       rgb_controller = new RGBController_GMOW(controller);
-
-            detected_controllers.push_back(rgb_controller);
-        }
-        else
-        {
-            hid_close(dev);
-        }
+        detected_controllers.push_back(rgb_controller);
     }
 
     return(detected_controllers);

@@ -994,7 +994,6 @@
 #define SAPPHIRE_NAVI31_GRE_NITRO_PLUS_SUB_DEV                  0xE475
 #define SAPPHIRE_NAVI32_7800XT_NITRO_PLUS_SUB_DEV               0xD475
 #define SAPPHIRE_NAVI32_7700XT_NITRO_PLUS_SUB_DEV               0xF475
-#define SAPPHIRE_NAVI32_7700XT_PURE_SUB_DEV                     0x475C
 
 /*-----------------------------------------------------*\
 | Zotac Sub-Device IDs                                  |
